@@ -1,0 +1,67 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Virtual environments and local package managers
+.venv/
+venv/
+env/
+ENV/
+conda-meta/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local secrets
+.env
+.env.*
+!.env.example
+deploy_bundle/secrets/telegram.env
+*.pem
+*.key
+
+# Generated outputs and scratch work
+output/**
+!output/README.md
+tmp/**
+!tmp/README.md
+tmp_bg_test.txt
+
+# Downloaded runtime artifacts and sample inputs
+output_inference/**
+!output_inference/README.md
+test_data/**
+!test_data/README.md
+deploy_bundle/models/**
+!deploy_bundle/models/README.md
+models/**
+!models/README.md
+
+# Logs
+*.log
+
+# Private planning / thesis draft notes
+bao_cao_*.md
+benchmark_3_5_logic_alert.md
+benchmark_time.md
+chuong_3_so_bo.md
+lcnet_finetune_writeup.md
+picodet_finetune_writeup.md
+section_3_5_draft.md
+section_3_6_draft.md
+section_3_6_figure_captions.md

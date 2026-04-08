@@ -1,0 +1,16 @@
+# Install PaddlePaddle separately first.
+# See README.md for the verified Windows GPU command and the CPU alternative.
+
+# Core runtime dependencies
+numpy==1.23.5
+opencv-python==4.5.5.64
+Pillow==11.3.0
+PyYAML==6.0.3
+requests==2.32.5
+scipy==1.13.1
+tqdm==4.67.1
+numba==0.60.0
+
+# Public utilities
+matplotlib==3.9.4
+psutil==7.1.3

@@ -1,0 +1,59 @@
+crop_thresh: 0.5
+visual: True
+visual_style: minimal
+warmup_frame: 10
+
+DET:
+  model_dir: output_inference/picodet_m_416_classroom
+  batch_size: 8
+  enable_tensorrt: True
+MOT:
+  model_dir: output_inference/picodet_m_416_classroom
+  tracker_config: deploy/pipeline/config/tracker_config.yml
+  batch_size: 1
+  skip_frame_num: 2 # preferably no more than 3
+  threshold: 0.5
+  enable: True
+
+VIDEO_ACTION:
+  model_dir: output_inference/ppTSM_fight/ppTSM
+  batch_size: 1
+  frame_len: 8
+  sample_freq: 7
+  short_size: 340
+  target_size: 320
+  enable: False
+
+ID_BASED_CLSACTION:
+  model_dir: output_inference/pplcnet_behavior
+  batch_size: 16
+  threshold: 0.6
+  display_frames: 30
+  skip_frame_num: 2
+  crop_mode: full
+  upper_crop_ratio: 0.5
+  state_machine:
+    sleep_warn_seconds: 5.0
+    sleep_alert_seconds: 12.0
+    phone_warn_seconds: 6.0
+    phone_alert_seconds: 15.0
+    warn_cooldown_seconds: 8.0
+    alert_cooldown_seconds: 15.0
+    stale_track_seconds: 2.0
+    min_confidence: 0.5
+    emit_end_event: True
+  enable: True
+
+TELEGRAM_ALERT:
+  enable: False
+  bot_token: ""
+  chat_id: ""
+  send_rules:
+    warn: ["enter"]
+    alert: ["enter", "repeat"]
+  queue_size: 64
+  timeout_seconds: 15.0
+  jpeg_quality: 85
+  send_retries: 3
+  retry_delay_seconds: 1.0
+  max_long_edge: 1280

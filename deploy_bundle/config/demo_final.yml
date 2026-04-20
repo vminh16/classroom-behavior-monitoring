@@ -41,6 +41,12 @@ ID_BASED_CLSACTION:
   skip_frame_num: 2
   crop_mode: full
   upper_crop_ratio: 0.5
+  async_worker:
+    enable: False
+    queue_size: 1
+    frame_buffer_size: 32
+    worker_device: same
+    worker_run_mode: same
   state_machine:
     sleep_warn_seconds: 5.0
     sleep_alert_seconds: 12.0

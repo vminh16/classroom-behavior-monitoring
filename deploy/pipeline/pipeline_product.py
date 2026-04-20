@@ -24,7 +24,7 @@ import copy
 import threading
 import queue
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from urllib.parse import urlparse
 from datacollector import DataCollector, Result
@@ -48,6 +48,7 @@ from python.visualize import visualize_box_mask, visualize_attr, visualize_pose,
 from behavior_filter import BehaviorFilter
 from behavior_state_machine import BehaviorStateMachine
 from telegram_alert import TelegramAlertSink
+from async_cls_action import AsyncClsActionWorker, ClsActionPostProcessor
 
 from pptracking.python.mot_sde_infer import SDE_Detector
 from pptracking.python.mot.visualize import plot_tracking_dict
@@ -594,6 +595,15 @@ class PipePredictor(object):
         self.file_name = None
         self.collector = DataCollector() if self.with_mtmct else _NullCollector(
         )
+        self.latest_behavior_events = []
+        self.behavior_event_history = deque(maxlen=512)
+        self.telegram_alert = None
+        self.cls_action_async_worker = None
+        self.cls_action_postprocessor = None
+        self._async_cls_cache = {}
+        self._async_cls_last_frame_id = -1
+        self._async_cls_frame_buffer = OrderedDict()
+        self._async_cls_frame_buffer_size = 0
         self._show_local_preview = False
         self._save_visual_output = bool(self.cfg.get('visual', False))
         self.preview_window_name = str(
@@ -639,38 +649,31 @@ class PipePredictor(object):
                 basemode = self.basemode['ID_BASED_CLSACTION']
                 self.modebase[basemode] = True
 
-                self.cls_action_predictor = ClsActionRecognizer.init_with_cfg(
-                    args, idbased_clsaction_cfg)
                 self.cls_action_visual_helper = ActionVisualHelper(1)
-                self.clsaction_labels = None
-                if hasattr(self.cls_action_predictor,
-                           'pred_config') and self.cls_action_predictor.pred_config:
-                    self.clsaction_labels = self.cls_action_predictor.pred_config.labels
-                if not self.clsaction_labels:
-                    self.clsaction_labels = ['normal', 'using_phone', 'sleeping']
-                self.behavior_filter = BehaviorFilter(
-                    window_size=60, majority_ratio=0.6)
-                normal_id, phone_id, sleeping_id = self._resolve_behavior_class_ids(
-                    self.clsaction_labels)
-                state_cfg = idbased_clsaction_cfg.get('state_machine', {})
-                self.behavior_state_machine = BehaviorStateMachine(
-                    normal_id=normal_id,
-                    phone_id=phone_id,
-                    sleeping_id=sleeping_id,
-                    sleep_warn_seconds=state_cfg.get('sleep_warn_seconds', 5.0),
-                    sleep_alert_seconds=state_cfg.get('sleep_alert_seconds', 12.0),
-                    phone_warn_seconds=state_cfg.get('phone_warn_seconds', 6.0),
-                    phone_alert_seconds=state_cfg.get('phone_alert_seconds', 15.0),
-                    warn_cooldown_seconds=state_cfg.get(
-                        'warn_cooldown_seconds', 8.0),
-                    alert_cooldown_seconds=state_cfg.get(
-                        'alert_cooldown_seconds', 15.0),
-                    stale_track_seconds=state_cfg.get('stale_track_seconds', 2.0),
-                    min_confidence=state_cfg.get('min_confidence', None),
-                    emit_end_event=state_cfg.get('emit_end_event', True))
-                self.latest_behavior_events = []
-                self.behavior_event_history = deque(maxlen=512)
-                self.telegram_alert = None
+                if idbased_clsaction_cfg.get('async_worker', {}).get(
+                        'enable', False):
+                    self.cls_action_async_worker = AsyncClsActionWorker.init_with_cfg(
+                        args, idbased_clsaction_cfg)
+                    self.cls_action_predictor = self.cls_action_async_worker.predictor
+                    self.clsaction_labels = self._get_cls_action_labels()
+                    self._async_cls_frame_buffer_size = max(
+                        4,
+                        int(
+                            idbased_clsaction_cfg.get('async_worker',
+                                                      {}).get(
+                                                          'frame_buffer_size',
+                                                          32) or 32))
+                    print(
+                        'Async cls_action worker enabled on {} ({})'.format(
+                            self.cls_action_async_worker.worker_device,
+                            self.cls_action_async_worker.worker_run_mode))
+                else:
+                    self.cls_action_predictor = ClsActionRecognizer.init_with_cfg(
+                        args, idbased_clsaction_cfg)
+                    self.clsaction_labels = self._get_cls_action_labels()
+                    self.cls_action_postprocessor = self._build_cls_action_postprocessor(
+                        idbased_clsaction_cfg)
+
                 telegram_cfg = self.cfg.get('TELEGRAM_ALERT', {})
                 if telegram_cfg.get('enable', False):
                     self.telegram_alert = TelegramAlertSink.from_cfg(
@@ -882,6 +885,10 @@ class PipePredictor(object):
     def _reset_action_predictor_cache(self, predictor):
         if predictor is None:
             return
+        if predictor is getattr(self, 'cls_action_predictor', None) and getattr(
+                self, 'cls_action_async_worker', None) is not None:
+            self.cls_action_async_worker.reset()
+            return
         if hasattr(predictor, 'result_history'):
             predictor.result_history.clear()
         if hasattr(predictor, 'id_in_last_frame'):
@@ -894,12 +901,19 @@ class PipePredictor(object):
         if not stale_ids:
             return
 
+        if getattr(self, 'cls_action_async_worker', None) is not None:
+            for tid in stale_ids:
+                self._async_cls_cache.pop(int(tid), None)
+
         if hasattr(self, 'behavior_filter'):
             for tid in stale_ids:
                 self.behavior_filter.history.pop(tid, None)
                 self.behavior_filter.last_state.pop(tid, None)
 
-        for predictor_name in ('cls_action_predictor', 'det_action_predictor'):
+        predictor_names = ['det_action_predictor']
+        if getattr(self, 'cls_action_async_worker', None) is None:
+            predictor_names.insert(0, 'cls_action_predictor')
+        for predictor_name in predictor_names:
             predictor = getattr(self, predictor_name, None)
             if predictor is None:
                 continue
@@ -928,6 +942,8 @@ class PipePredictor(object):
             )
 
     def _cleanup_behavior_state(self, now_ts):
+        if getattr(self, 'cls_action_async_worker', None) is not None:
+            return []
         if not hasattr(self, 'behavior_state_machine'):
             return []
 
@@ -942,12 +958,15 @@ class PipePredictor(object):
     def _reset_runtime_state_for_reconnect(self):
         self.pipeline_res = Result()
         self.latest_behavior_events = []
+        self._clear_async_cls_cache()
 
         if hasattr(self, 'behavior_state_machine'):
             self.behavior_state_machine.tracks.clear()
         if hasattr(self, 'behavior_filter'):
             self.behavior_filter.history.clear()
             self.behavior_filter.last_state.clear()
+        if getattr(self, 'cls_action_async_worker', None) is not None:
+            self.cls_action_async_worker.reset()
 
         self._reset_action_predictor_cache(
             getattr(self, 'cls_action_predictor', None))
@@ -1093,6 +1112,96 @@ class PipePredictor(object):
             writer.write(image_bgr)
         return self._preview_frame(image_bgr)
 
+    def _build_cls_action_postprocessor(self, cls_cfg):
+        normal_id, phone_id, sleeping_id = self._resolve_behavior_class_ids(
+            self.clsaction_labels)
+        state_cfg = cls_cfg.get('state_machine', {})
+        self.behavior_filter = BehaviorFilter(window_size=60, majority_ratio=0.6)
+        self.behavior_state_machine = BehaviorStateMachine(
+            normal_id=normal_id,
+            phone_id=phone_id,
+            sleeping_id=sleeping_id,
+            sleep_warn_seconds=state_cfg.get('sleep_warn_seconds', 5.0),
+            sleep_alert_seconds=state_cfg.get('sleep_alert_seconds', 12.0),
+            phone_warn_seconds=state_cfg.get('phone_warn_seconds', 6.0),
+            phone_alert_seconds=state_cfg.get('phone_alert_seconds', 15.0),
+            warn_cooldown_seconds=state_cfg.get('warn_cooldown_seconds', 8.0),
+            alert_cooldown_seconds=state_cfg.get('alert_cooldown_seconds',
+                                                  15.0),
+            stale_track_seconds=state_cfg.get('stale_track_seconds', 2.0),
+            min_confidence=state_cfg.get('min_confidence', None),
+            emit_end_event=state_cfg.get('emit_end_event', True))
+        return ClsActionPostProcessor(self.behavior_filter,
+                                      self.behavior_state_machine)
+
+    def _clear_async_cls_cache(self):
+        self._async_cls_cache.clear()
+        self._async_cls_last_frame_id = -1
+        self._async_cls_frame_buffer.clear()
+
+    def _buffer_async_cls_frame(self, frame_rgb, frame_id):
+        if self.cls_action_async_worker is None or self._async_cls_frame_buffer_size <= 0:
+            return
+        self._async_cls_frame_buffer[int(frame_id)] = frame_rgb.copy()
+        while len(self._async_cls_frame_buffer) > self._async_cls_frame_buffer_size:
+            self._async_cls_frame_buffer.popitem(last=False)
+
+    def _trim_async_frame_buffer(self, upto_frame_id):
+        stale_keys = [
+            key for key in self._async_cls_frame_buffer.keys()
+            if int(key) <= int(upto_frame_id)
+        ]
+        for key in stale_keys:
+            self._async_cls_frame_buffer.pop(key, None)
+
+    def _drain_async_cls_packets(self):
+        worker = self.cls_action_async_worker
+        if worker is None:
+            return
+        if worker.last_error is not None:
+            raise RuntimeError(
+                "Async cls_action worker failed: {}".format(worker.last_error))
+
+        for packet in worker.poll_packets():
+            if packet.frame_id <= self._async_cls_last_frame_id:
+                continue
+            self._async_cls_last_frame_id = packet.frame_id
+            for stale_id in packet.stale_track_ids:
+                self._async_cls_cache.pop(int(stale_id), None)
+            for tid, res in packet.results.items():
+                self._async_cls_cache[int(tid)] = res
+            if packet.results:
+                self.cls_action_visual_helper.update(list(packet.results.items()))
+
+            self.latest_behavior_events = []
+            if packet.events:
+                self._record_behavior_events(packet.events)
+                frame_rgb = self._async_cls_frame_buffer.get(packet.frame_id)
+                if frame_rgb is not None:
+                    result_snapshot = {
+                        'mot': packet.mot_res,
+                        'cls_action': packet.results,
+                    }
+                    self._notify_behavior_events(
+                        frame_rgb,
+                        packet.frame_id,
+                        result_snapshot=result_snapshot)
+            self._trim_async_frame_buffer(packet.frame_id)
+
+    def _build_async_visible_cls_results(self, mot_res):
+        if mot_res is None:
+            return {}
+        boxes = mot_res.get('boxes')
+        if boxes is None or len(boxes) == 0:
+            return {}
+        visible = {}
+        for mot_box in boxes:
+            track_id = int(mot_box[0])
+            res = self._async_cls_cache.get(track_id)
+            if res is not None:
+                visible[track_id] = dict(res) if isinstance(res, dict) else res
+        return visible
+
     def _resolve_behavior_class_ids(self, labels):
         normal_id, phone_id, sleeping_id = 0, 1, 2
         if not labels:
@@ -1108,6 +1217,9 @@ class PipePredictor(object):
         return normal_id, phone_id, sleeping_id
 
     def _get_cls_action_labels(self):
+        cls_labels = getattr(self, 'clsaction_labels', None)
+        if cls_labels:
+            return cls_labels
         cls_labels = getattr(getattr(self, 'cls_action_predictor', None),
                              'pred_config', None)
         cls_labels = getattr(cls_labels, 'labels',
@@ -1116,8 +1228,14 @@ class PipePredictor(object):
             cls_labels = ['normal', 'using_phone', 'sleeping']
         return cls_labels
 
-    def _build_behavior_alert_frame(self, frame_rgb, frame_id, event):
-        image = draw_minimal_video_result(frame_rgb, self.pipeline_res,
+    def _build_behavior_alert_frame(self,
+                                    frame_rgb,
+                                    frame_id,
+                                    event,
+                                    result_snapshot=None):
+        image = draw_minimal_video_result(frame_rgb, result_snapshot
+                                          if result_snapshot is not None else
+                                          self.pipeline_res,
                                           self._get_cls_action_labels())
         height, width = image.shape[:2]
         level = str(event.get('alert_level', '')).strip().lower()
@@ -1145,7 +1263,7 @@ class PipePredictor(object):
                     cv2.LINE_AA)
         return image
 
-    def _notify_behavior_events(self, frame_rgb, frame_id):
+    def _notify_behavior_events(self, frame_rgb, frame_id, result_snapshot=None):
         sink = getattr(self, 'telegram_alert', None)
         if sink is None or not self.latest_behavior_events:
             return
@@ -1154,8 +1272,8 @@ class PipePredictor(object):
         for event in self.latest_behavior_events:
             if not sink.accepts(event):
                 continue
-            image = self._build_behavior_alert_frame(frame_rgb, frame_id,
-                                                     event)
+            image = self._build_behavior_alert_frame(
+                frame_rgb, frame_id, event, result_snapshot=result_snapshot)
             ok = sink.enqueue(event, image, source_name, frame_id)
             if not ok:
                 _safe_print(
@@ -1740,6 +1858,9 @@ class PipePredictor(object):
         if self.with_video_action:
             short_size = self.cfg["VIDEO_ACTION"]["short_size"]
             scale = ShortSizeScale(short_size)
+        if self.cls_action_async_worker is not None:
+            self.cls_action_async_worker.start()
+            self._clear_async_cls_cache()
 
         try:
             while True:
@@ -1747,6 +1868,8 @@ class PipePredictor(object):
                 reconnect_changed = reader.reconnect_count != last_reconnect_count
 
                 if packet is None:
+                    if self.cls_action_async_worker is not None:
+                        self._drain_async_cls_packets()
                     if reconnect_changed:
                         last_reconnect_count = reader.reconnect_count
                         self._reset_runtime_state_for_reconnect()
@@ -1795,6 +1918,8 @@ class PipePredictor(object):
 
                 self.pipeline_res = Result()
                 self.latest_behavior_events = []
+                if self.cls_action_async_worker is not None:
+                    self._drain_async_cls_packets()
 
                 if frame_id > self.warmup_frame:
                     self.pipe_timer.total_time.start()
@@ -1867,7 +1992,13 @@ class PipePredictor(object):
                     self.pipeline_res.update(mot_res, 'mot')
 
                     if len(mot_res['boxes']) == 0:
-                        self._cleanup_behavior_state(now_ts)
+                        if self.cls_action_async_worker is not None:
+                            self._buffer_async_cls_frame(frame_rgb, frame_id)
+                            self.cls_action_async_worker.submit_cleanup(
+                                frame_id, now_ts)
+                            self._drain_async_cls_packets()
+                        else:
+                            self._cleanup_behavior_state(now_ts)
                     else:
                         if self.with_human_attr:
                             if frame_id > self.warmup_frame:
@@ -1893,21 +2024,33 @@ class PipePredictor(object):
                                     det_action_res)
 
                         if self.with_idbased_clsaction:
-                            if frame_id > self.warmup_frame:
-                                self.pipe_timer.module_time['cls_action'].start(
-                                )
-                            cls_action_res = self.cls_action_predictor.predict_with_mot(
-                                crop_input, mot_res)
-                            cls_action_res = self.apply_behavior_filter(
-                                cls_action_res, now=now_ts)
-                            if frame_id > self.warmup_frame:
-                                self.pipe_timer.module_time['cls_action'].end()
+                            if self.cls_action_async_worker is not None:
+                                self._buffer_async_cls_frame(frame_rgb, frame_id)
+                                self.cls_action_async_worker.submit_infer(
+                                    frame_id, now_ts, crop_input, mot_res)
+                                self._drain_async_cls_packets()
+                                cls_action_res = self._build_async_visible_cls_results(
+                                    mot_res)
+                            else:
+                                if frame_id > self.warmup_frame:
+                                    self.pipe_timer.module_time[
+                                        'cls_action'].start()
+                                cls_action_res = self.cls_action_predictor.predict_with_mot(
+                                    crop_input, mot_res)
+                                cls_action_res = self.apply_behavior_filter(
+                                    cls_action_res, now=now_ts)
+                                if frame_id > self.warmup_frame:
+                                    self.pipe_timer.module_time[
+                                        'cls_action'].end()
                             self.pipeline_res.update(cls_action_res,
                                                      'cls_action')
                             if self.cfg['visual']:
-                                self.cls_action_visual_helper.update(
-                                    cls_action_res)
-                            self._notify_behavior_events(frame_rgb, frame_id)
+                                if self.cls_action_async_worker is None:
+                                    self.cls_action_visual_helper.update(
+                                        cls_action_res)
+                            if self.cls_action_async_worker is None:
+                                self._notify_behavior_events(frame_rgb,
+                                                             frame_id)
 
                         if self.with_skeleton_action:
                             if frame_id > self.warmup_frame:
@@ -2033,6 +2176,8 @@ class PipePredictor(object):
         finally:
             reader.stop()
             reader.join(timeout=2.0)
+            if self.cls_action_async_worker is not None:
+                self.cls_action_async_worker.stop(timeout=2.0)
 
             if writer is not None:
                 writer.release()
@@ -2273,94 +2418,13 @@ class PipePredictor(object):
             start_idx += boxes_num_i
 
     def apply_behavior_filter(self, cls_action_res, now=None):
-        if cls_action_res is None or not hasattr(self, 'behavior_filter'):
+        if cls_action_res is None or self.cls_action_postprocessor is None:
             return cls_action_res
         now_ts = time.time() if now is None else float(now)
         self.latest_behavior_events = []
-
-        if isinstance(cls_action_res, dict):
-            id_to_res = dict(cls_action_res)
-        else:
-            id_to_res = {}
-            for item in cls_action_res:
-                try:
-                    tid, res = item
-                except Exception:
-                    continue
-                id_to_res[int(tid)] = res
-
-        for tid, res in id_to_res.items():
-            cls_id = 0
-            score = None
-            scores_vec = None
-            if isinstance(res, dict):
-                cls_id = int(res.get('class', 0))
-                score = res.get('score', None)
-                score = float(score) if score is not None else None
-                scores_vec = res.get('scores')
-            elif isinstance(res, (list, tuple, np.ndarray)):
-                if len(res) == 2 and not isinstance(
-                        res[0], (list, tuple, np.ndarray)):
-                    cls_id = int(res[0])
-                    score = float(res[1])
-                else:
-                    scores_vec = res
-            if scores_vec is not None and score is None:
-                scores = np.array(scores_vec, dtype=np.float32).flatten()
-                if scores.size > 0:
-                    cls_id = int(scores.argmax())
-                    score = float(scores.max())
-
-            voted = self.behavior_filter.update(int(tid), int(cls_id), score)
-            if voted is None:
-                last_state = self.behavior_filter.get_last(int(tid))
-                if last_state is not None:
-                    voted_cls, voted_score = last_state
-                else:
-                    voted_cls, voted_score = cls_id, score
-            else:
-                voted_cls, voted_score = voted
-
-            state_name = 'NORMAL'
-            state_events = []
-            if hasattr(self, 'behavior_state_machine'):
-                state_name, state_events = self.behavior_state_machine.update(
-                    track_id=int(tid),
-                    behavior=int(voted_cls),
-                    now=now_ts,
-                    score=voted_score)
-                self._record_behavior_events(state_events)
-
-            if isinstance(res, dict):
-                res['class'] = int(voted_cls)
-                if voted_score is None and scores_vec is not None:
-                    try:
-                        voted_score = float(scores_vec[int(voted_cls)])
-                    except Exception:
-                        voted_score = None
-                if voted_score is None and score is not None:
-                    voted_score = float(score)
-                res['score'] = voted_score
-                res['voted'] = voted is not None
-                res['state'] = state_name
-                if len(state_events) > 0:
-                    res['alert_event'] = state_events[-1]
-                elif 'alert_event' in res:
-                    del res['alert_event']
-                id_to_res[int(tid)] = res
-            else:
-                id_to_res[int(tid)] = {
-                    'class': int(voted_cls),
-                    'score': voted_score if voted_score is not None else (
-                        score if score is not None else -1.0),
-                    'scores': scores_vec,
-                    'voted': voted is not None,
-                    'state': state_name,
-                    'alert_event': state_events[-1] if len(state_events) > 0 else None,
-                }
-
-        self._cleanup_behavior_state(now_ts)
-
+        id_to_res, events, _ = self.cls_action_postprocessor.process(
+            cls_action_res, now_ts)
+        self._record_behavior_events(events)
         if isinstance(cls_action_res, dict):
             return id_to_res
         return list(id_to_res.items())

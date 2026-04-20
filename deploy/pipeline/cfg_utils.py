@@ -26,19 +26,16 @@ class ArgsParser(ArgumentParser):
         for s in opts:
             s = s.strip()
             k, v = s.split('=', 1)
-            if '.' not in k:
-                config[k] = yaml.load(v, Loader=yaml.Loader)
-            else:
-                keys = k.split('.')
-                if keys[0] not in config:
-                    config[keys[0]] = {}
-                cur = config[keys[0]]
-                for idx, key in enumerate(keys[1:]):
-                    if idx == len(keys) - 2:
-                        cur[key] = yaml.load(v, Loader=yaml.Loader)
-                    else:
-                        cur[key] = {}
-                        cur = cur[key]
+            value = yaml.load(v, Loader=yaml.Loader)
+            keys = k.split('.')
+            cur = config
+            for key in keys[:-1]:
+                existing = cur.get(key)
+                if not isinstance(existing, dict):
+                    existing = {}
+                    cur[key] = existing
+                cur = existing
+            cur[keys[-1]] = value
         return config
 
 
@@ -191,27 +188,26 @@ def merge_cfg(args):
         return merge_cfg
 
     def merge_opt(cfg, arg):
+        def deep_merge(target, updates, parent_path=""):
+            for key, value in updates.items():
+                path = "{}.{}".format(parent_path, key) if parent_path else key
+                if key not in target:
+                    print("No", path, "in config file!")
+                    continue
+                if isinstance(value, dict):
+                    if not isinstance(target[key], dict):
+                        print("Config field", path,
+                              "is not a dict; replace directly.")
+                        target[key] = copy.deepcopy(value)
+                        continue
+                    deep_merge(target[key], value, path)
+                else:
+                    target[key] = value
+
         merge_cfg = copy.deepcopy(cfg)
         # merge opt
         if 'opt' in arg.keys() and arg['opt']:
-            for name, value in arg['opt'].items(
-            ):  # example: {'MOT': {'batch_size': 3}}
-                if name not in merge_cfg.keys():
-                    print("No", name, "in config file!")
-                    continue
-                if isinstance(value, dict):
-                    if not isinstance(merge_cfg[name], dict):
-                        print("Config field", name,
-                              "is not a dict; replace directly.")
-                        merge_cfg[name] = value
-                        continue
-                    for sub_k, sub_v in value.items():
-                        if sub_k not in merge_cfg[name].keys():
-                            print("No", sub_k, "in config file of", name, "!")
-                            continue
-                        merge_cfg[name][sub_k] = sub_v
-                else:
-                    merge_cfg[name] = value
+            deep_merge(merge_cfg, arg['opt'])
 
         return merge_cfg
 

@@ -595,6 +595,14 @@ class PipePredictor(object):
         self.collector = DataCollector() if self.with_mtmct else _NullCollector(
         )
         self._show_local_preview = False
+        self._save_visual_output = bool(self.cfg.get('visual', False))
+        self.preview_window_name = str(
+            self.cfg.get('preview_window_name', 'Paddle-Pipeline'))
+        self.preview_max_fps = max(
+            0.0, float(self.cfg.get('preview_max_fps', 0.0) or 0.0))
+        self.preview_max_width = max(
+            0, int(self.cfg.get('preview_max_width', 0) or 0))
+        self._last_preview_wall_time = 0.0
 
         self.pushurl = args.pushurl
 
@@ -763,8 +771,8 @@ class PipePredictor(object):
                     args, video_action_cfg)
 
     def set_file_name(self, path):
-        self._show_local_preview = isinstance(path, int) or _is_live_stream_source(
-            path)
+        self._show_local_preview = self._resolve_preview_local(path)
+        self._save_visual_output = self._resolve_save_visual_output(path)
         self.file_name = _safe_source_name(path)
 
     def _compute_behavior_timestamp(self,
@@ -781,8 +789,79 @@ class PipePredictor(object):
             return max(0.0, float(capture_time) - float(first_capture_time))
         return frame_id / max(float(source_fps), 1.0)
 
+    @staticmethod
+    def _is_truthy(value):
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in ('1', 'true', 'yes', 'y', 'on'):
+                return True
+            if text in ('0', 'false', 'no', 'n', 'off'):
+                return False
+        return bool(value)
+
+    def _resolve_preview_local(self, path):
+        setting = self.cfg.get('preview_local', 'auto')
+        is_live_source = isinstance(path, int) or _is_live_stream_source(path)
+        if isinstance(setting, str):
+            text = setting.strip().lower()
+            if text in ('auto', 'live'):
+                return is_live_source
+            if text in ('file', 'video'):
+                return not is_live_source
+        return self._is_truthy(setting)
+
+    def _resolve_save_visual_output(self, path):
+        setting = self.cfg.get('save_visual_output', True)
+        is_live_source = isinstance(path, int) or _is_live_stream_source(path)
+        if isinstance(setting, str):
+            text = setting.strip().lower()
+            if text == 'auto':
+                return not is_live_source
+            if text in ('live', ):
+                return is_live_source
+            if text in ('file', 'video'):
+                return not is_live_source
+        return self._is_truthy(setting)
+
+    def _preview_frame(self, image_bgr):
+        if not self._show_local_preview:
+            return True
+
+        now = time.monotonic()
+        if self.preview_max_fps > 0.0:
+            min_interval = 1.0 / self.preview_max_fps
+            if (now - self._last_preview_wall_time) < min_interval:
+                try:
+                    return (cv2.waitKey(1) & 0xFF) != ord('q')
+                except Exception:
+                    return True
+            self._last_preview_wall_time = now
+
+        preview_image = image_bgr
+        if self.preview_max_width > 0:
+            height, width = preview_image.shape[:2]
+            if width > self.preview_max_width:
+                scale = float(self.preview_max_width) / float(width)
+                target_height = max(1, int(round(height * scale)))
+                preview_image = cv2.resize(
+                    preview_image, (self.preview_max_width, target_height),
+                    interpolation=cv2.INTER_AREA)
+        try:
+            cv2.imshow(self.preview_window_name, preview_image)
+            return (cv2.waitKey(1) & 0xFF) != ord('q')
+        except Exception:
+            return True
+
     def _close_pushstream(self, pushstream):
         if pushstream is None:
+            return
+        if hasattr(pushstream, 'close'):
+            try:
+                pushstream.close(timeout=2.0)
+            finally:
+                if hasattr(pushstream, 'stats'):
+                    _safe_print("[PushStream] stats: {}".format(
+                        pushstream.stats()))
             return
         pipe = getattr(pushstream, 'pipe', None)
         if pipe is None:
@@ -970,7 +1049,7 @@ class PipePredictor(object):
                               frame_width, frame_height, source_fps):
         if writer is not None or pushstream is not None:
             return writer, pushstream, out_path
-        if len(self.pushurl) == 0 and not self.cfg['visual']:
+        if len(self.pushurl) == 0 and not self._save_visual_output:
             return writer, pushstream, out_path
 
         video_out_name = self.file_name or 'output'
@@ -981,9 +1060,14 @@ class PipePredictor(object):
         if len(self.pushurl) > 0:
             pushurl = self.pushurl.rstrip('/') + '/' + video_out_name
             print("the result will push stream to url:{}".format(pushurl))
-            pushstream = PushStream(pushurl)
+            push_cfg = self.cfg.get('PUSH_STREAM', {})
+            pushstream = PushStream(
+                pushurl,
+                queue_size=push_cfg.get('queue_size', 1),
+                muxdelay=push_cfg.get('muxdelay', 0.1))
             pushstream.initcmd(source_fps, frame_width, frame_height)
-            return writer, pushstream, out_path
+            if not self._save_visual_output:
+                return writer, pushstream, out_path
 
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -996,20 +1080,18 @@ class PipePredictor(object):
     def _write_visual_output(self, image_bgr, writer, pushstream):
         if pushstream is not None:
             try:
-                pushstream.pipe.stdin.write(image_bgr.tobytes())
+                ok = pushstream.enqueue_frame(image_bgr)
+                if not ok:
+                    _safe_print("ERROR: Push stream queue is full or closed")
+                    return False
             except Exception as exc:
                 _safe_print("ERROR: Unable to write to push stream: {}".format(
                     exc))
                 return False
-            return True
 
         if writer is not None:
             writer.write(image_bgr)
-            if self._show_local_preview:
-                cv2.imshow('Paddle-Pipeline', image_bgr)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    return False
-        return True
+        return self._preview_frame(image_bgr)
 
     def _resolve_behavior_class_ids(self, labels):
         normal_id, phone_id, sleeping_id = 0, 1, 2
@@ -1681,6 +1763,8 @@ class PipePredictor(object):
 
                 frame_rgb = packet.frame_rgb
                 frame_height, frame_width = frame_rgb.shape[:2]
+                self._web_last_capture_time = packet.capture_time
+                self._web_last_input_frame_index = packet.frame_index
                 if flow_state is None:
                     flow_state = self._init_flow_state(frame_width,
                                                        frame_height)

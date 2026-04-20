@@ -5,6 +5,10 @@
 crop_thresh: 0.5
 visual: True
 visual_style: minimal
+preview_local: auto
+preview_max_fps: 12
+preview_max_width: 1280
+save_visual_output: auto
 warmup_frame: 10
 
 DET:
@@ -62,3 +66,7 @@ TELEGRAM_ALERT:
   send_retries: 3
   retry_delay_seconds: 1.0
   max_long_edge: 1280
+
+PUSH_STREAM:
+  queue_size: 1
+  muxdelay: 0.1

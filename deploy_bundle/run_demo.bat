@@ -1,4 +1,4 @@
 @echo off
 setlocal
-powershell -ExecutionPolicy Bypass -File "%~dp0run_demo.ps1" %*
+call "%~dp0run_demo.cmd" %*
 exit /b %ERRORLEVEL%

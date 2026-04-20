@@ -18,13 +18,17 @@ Large runtime artifacts are restored separately from the Drive bundle described 
 - classifier: PPLCNet_x1_0 for `normal`, `using_phone`, `sleeping`
 - alert logic: temporal filter + behavior state machine
 - Telegram: optional and loaded from a local env file, not from YAML
+- local preview: configurable with `preview_local`
+- video saving: decoupled from preview with `save_visual_output`
 
 ## Included Files
 
 - `config/demo_final.yml`: final secret-free config for demo
 - `config/tracker_config.demo.yml`: final tracker config
 - `run_demo.ps1`: main one-command launcher
-- `run_demo.bat`: batch wrapper for the PowerShell launcher
+- `run_demo.cmd`: native CMD launcher for the demo
+- `run_demo.bat`: compatibility wrapper that now forwards to `run_demo.cmd`
+- `menu.cmd`: interactive CMD menu for choosing input and launch options
 - `environment/environment.demo.yml`: minimal environment file
 - `environment/verified_versions.txt`: versions verified on the author's machine
 - `secrets/telegram.env.example`: template for Telegram secrets
@@ -81,6 +85,24 @@ Or:
 
 ```bat
 deploy_bundle\run_demo.bat
+```
+
+Native CMD launcher:
+
+```bat
+deploy_bundle\run_demo.cmd video --dry-run
+```
+
+RTSP with forced local preview and no disk recording:
+
+```bat
+deploy_bundle\run_demo.cmd rtsp --rtsp-url "rtsp://<user>:<password>@<camera-ip>/Streaming/Channels/101" --preview-local --no-save-video
+```
+
+Interactive CMD menu:
+
+```bat
+deploy_bundle\menu.cmd
 ```
 
 ### 3. Run on webcam

@@ -16,6 +16,8 @@ import time
 import os
 import ast
 import glob
+import queue
+import threading
 import yaml
 import copy
 import numpy as np
@@ -123,21 +125,118 @@ class PipeTimer(Times):
 
 
 class PushStream(object):
-    def __init__(self, pushurl="rtsp://127.0.0.1:8554/"):
+    def __init__(self,
+                 pushurl="rtsp://127.0.0.1:8554/",
+                 queue_size=1,
+                 muxdelay=0.1):
         self.command = ""
-        # 自行设置
         self.pushurl = pushurl
+        self.queue = queue.Queue(maxsize=max(1, int(queue_size)))
+        self.muxdelay = max(0.0, float(muxdelay))
+        self.stop_event = threading.Event()
+        self.worker = None
+        self.pipe = None
+        self.stats_lock = threading.Lock()
+        self._stats = {
+            "accepted": 0,
+            "sent": 0,
+            "dropped": 0,
+            "failed": 0,
+        }
 
     def initcmd(self, fps, width, height):
         self.command = [
-            'ffmpeg', '-y','-re',
+            'ffmpeg', '-y',
             '-f', 'rawvideo', '-pix_fmt', 'bgr24',
             '-s', f'{width}x{height}', '-r', str(fps),
-            '-i', '-',  # đọc dữ liệu từ stdin
+            '-i', '-',
+            '-an',
             '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-            '-f', 'rtsp','-rtsp_transport', 'tcp', self.pushurl
+            '-f', 'rtsp', '-muxdelay', str(self.muxdelay),
+            '-rtsp_transport', 'tcp', self.pushurl
         ]
         self.pipe = sp.Popen(self.command, stdin=sp.PIPE)
+        self.worker = threading.Thread(target=self._writer_loop, daemon=True)
+        self.worker.start()
+
+    def enqueue_frame(self, image_bgr):
+        if self.pipe is None or self.pipe.stdin is None or self.stop_event.is_set():
+            return False
+
+        payload = image_bgr.tobytes()
+        with self.stats_lock:
+            self._stats["accepted"] += 1
+
+        try:
+            self.queue.put_nowait(payload)
+            return True
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except queue.Empty:
+                pass
+            with self.stats_lock:
+                self._stats["dropped"] += 1
+            try:
+                self.queue.put_nowait(payload)
+                return True
+            except queue.Full:
+                with self.stats_lock:
+                    self._stats["failed"] += 1
+                return False
+
+    def stats(self):
+        with self.stats_lock:
+            return dict(self._stats)
+
+    def close(self, timeout=2.0):
+        self.stop_event.set()
+
+        if self.worker is not None:
+            self.worker.join(timeout=max(0.0, float(timeout)))
+
+        if self.pipe is None:
+            return
+
+        try:
+            if self.pipe.stdin:
+                self.pipe.stdin.close()
+        except Exception:
+            pass
+
+        try:
+            self.pipe.wait(timeout=max(0.0, float(timeout)))
+        except Exception:
+            try:
+                self.pipe.terminate()
+            except Exception:
+                pass
+
+    def _writer_loop(self):
+        while True:
+            if self.stop_event.is_set() and self.queue.empty():
+                return
+            try:
+                payload = self.queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                if self.pipe is None or self.pipe.stdin is None:
+                    with self.stats_lock:
+                        self._stats["failed"] += 1
+                    return
+                self.pipe.stdin.write(payload)
+                with self.stats_lock:
+                    self._stats["sent"] += 1
+            except Exception:
+                with self.stats_lock:
+                    self._stats["failed"] += 1
+                self.stop_event.set()
+                return
+            finally:
+                self.queue.task_done()
 
 
 def get_test_images(infer_dir, infer_img):

@@ -60,6 +60,7 @@ cho demo RTSP mới.
 - không cần mediaMTX
 - không cần encode lại RTSP output
 - không thêm buffer ở media server hoặc player
+- không ghi thêm MP4 ra đĩa nếu giữ `save_visual_output: auto`
 - logic AI giữ nguyên
 
 Nhược điểm:
@@ -96,6 +97,7 @@ Vì:
 - không làm thay đổi logic cảnh báo
 - không làm thay đổi kết quả nhận dạng
 - chỉ loại bỏ phần republish video, là phần làm tăng trễ nhưng không tăng độ chính xác
+- đồng thời tránh encode + push + buffer ở output path
 
 Nói ngắn gọn:
 
@@ -209,6 +211,17 @@ Ví dụ bằng ffplay:
 
 ```powershell
 ffplay -fflags nobuffer -flags low_delay -framedrop -rtsp_transport tcp "rtsp://127.0.0.1:8554/output/..."
+```
+
+Nếu vẫn muốn vừa republish vừa xem trực tiếp trên máy local:
+
+```powershell
+python deploy/pipeline/pipeline_product.py `
+  --config deploy/pipeline/config/infer_cfg_pphuman.yml `
+  --rtsp "rtsp://<user>:<password>@<camera-ip>/Streaming/Channels/101" `
+  --device gpu `
+  --pushurl "rtsp://127.0.0.1:8554/output" `
+  -o preview_local=True save_visual_output=False
 ```
 
 Hoặc VLC:

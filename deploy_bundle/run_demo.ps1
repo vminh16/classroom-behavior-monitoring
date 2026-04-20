@@ -12,6 +12,9 @@ param(
     [string]$SecretsFile = "",
     [string]$RunMode = "paddle",
     [string]$CondaExe = "",
+    [switch]$PreviewLocal,
+    [switch]$NoSaveVideo,
+    [int]$PreviewMaxFps = 0,
     [switch]$UseTelegram,
     [switch]$Cpu,
     [switch]$DryRun
@@ -118,6 +121,16 @@ $optArgs = @(
     "visual_style=minimal"
 )
 
+if ($PreviewLocal) {
+    $optArgs += "preview_local=True"
+}
+if ($NoSaveVideo) {
+    $optArgs += "save_visual_output=False"
+}
+if ($PreviewMaxFps -gt 0) {
+    $optArgs += "preview_max_fps=$PreviewMaxFps"
+}
+
 if ($UseTelegram) {
     $botToken = $Secrets["TELEGRAM_BOT_TOKEN"]
     $chatId = $Secrets["TELEGRAM_CHAT_ID"]
@@ -191,6 +204,8 @@ else {
 }
 Write-Host ("Output dir   : " + $OutputDir)
 Write-Host ("Telegram     : " + ($(if ($UseTelegram) { "enabled via env file" } else { "disabled" })))
+Write-Host ("Preview      : " + ($(if ($PreviewLocal) { "forced local preview" } else { "config/default" })))
+Write-Host ("Save video    : " + ($(if ($NoSaveVideo) { "disabled" } else { "config/default" })))
 Write-Host ""
 Write-Host "Command:"
 Write-Host (($command | ForEach-Object {

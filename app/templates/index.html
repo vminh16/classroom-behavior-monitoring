@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Classroom Monitoring UI</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Classroom Monitoring</p>
+          <h1>Web Operator Console</h1>
+          <p class="subtitle">
+            Start inference from one screen. Advanced settings stay hidden until you need them.
+          </p>
+        </div>
+        <div class="topbar-actions">
+          <button type="button" class="ghost-btn" id="refresh-btn">Reload</button>
+          <button type="button" class="primary-btn" id="config-open-btn">Open Config</button>
+          <div class="status-badge" id="session-state">{{ state.session_state }}</div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="main-stage">
+          <div class="panel launch-panel">
+            <div class="panel-head compact">
+              <div>
+                <h2>Source</h2>
+                <p class="panel-copy">Pick one source type. Only the matching input field will be shown.</p>
+              </div>
+            </div>
+
+            <input id="source-type" type="hidden" value="video" />
+
+            <div class="source-switch" id="source-switch">
+              <button type="button" class="source-chip active" data-source="video">Video File</button>
+              <button type="button" class="source-chip" data-source="rtsp">Live Stream</button>
+              <button type="button" class="source-chip" data-source="camera">Camera</button>
+            </div>
+
+            <div class="source-fields">
+              <div class="field" id="video-fields">
+                <label for="video-select">Demo video</label>
+                <select id="video-select"></select>
+                <label for="video-path">Custom video path</label>
+                <input id="video-path" type="text" placeholder="C:\path\to\video.mp4" />
+              </div>
+
+              <div class="field hidden" id="rtsp-url-field">
+                <label for="rtsp-url">RTSP livestream URL</label>
+                <input id="rtsp-url" type="text" placeholder="rtsp://user:pass@camera/Streaming/Channels/101" />
+              </div>
+
+              <div class="field hidden" id="camera-id-field">
+                <label for="camera-id">Camera ID</label>
+                <input id="camera-id" type="number" value="0" min="0" step="1" />
+              </div>
+            </div>
+
+            <div class="launch-actions">
+              <button type="button" class="primary-btn" id="start-btn">Start</button>
+              <button type="button" class="ghost-btn" id="stop-btn">Stop</button>
+              <button type="button" class="ghost-btn" id="config-inline-btn">Config</button>
+            </div>
+
+            <div class="hint" id="form-error"></div>
+          </div>
+
+          <div class="panel preview-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Preview (WebRTC)</h2>
+                <p class="panel-copy" id="source-label">No active source</p>
+              </div>
+              <div class="preview-pill">
+                <span>Render FPS</span>
+                <strong id="preview-pill-value">0.0</strong>
+              </div>
+            </div>
+
+            <div class="video-frame">
+              <iframe
+                id="video-feed"
+                title="Live preview"
+                allow="autoplay; fullscreen"
+                loading="eager"
+              ></iframe>
+            </div>
+
+            <div class="preview-note">
+              <strong>Processing FPS</strong> is the AI loop throughput before preview transport.
+              <strong>Render FPS</strong> is the server-side cadence after overlay rendering, before RTSP/WebRTC delivery.
+              <strong>Frame Age</strong> is the server-side age from capture to rendered overlay.
+              Preview itself is read from MediaMTX over WebRTC.
+            </div>
+          </div>
+        </section>
+
+        <section class="stats-grid">
+          <div class="panel stat-card">
+            <span class="stat-label">Processing FPS</span>
+            <span class="stat-value" id="inference-fps-value">0.00</span>
+          </div>
+          <div class="panel stat-card">
+            <span class="stat-label">Render FPS</span>
+            <span class="stat-value" id="preview-fps-value">0.00</span>
+          </div>
+          <div class="panel stat-card">
+            <span class="stat-label">Proc Latency</span>
+            <span class="stat-value" id="latency-value">0 ms</span>
+          </div>
+          <div class="panel stat-card">
+            <span class="stat-label">Frame Age</span>
+            <span class="stat-value" id="frame-age-value">0 ms</span>
+          </div>
+          <div class="panel stat-card">
+            <span class="stat-label">Tracks</span>
+            <span class="stat-value" id="tracks-value">0</span>
+          </div>
+          <div class="panel stat-card">
+            <span class="stat-label">Frames</span>
+            <span class="stat-value" id="frames-value">0</span>
+          </div>
+        </section>
+
+        <section class="panel lower-panel">
+          <div class="tab-bar">
+            <button type="button" class="tab-btn active" data-tab="overview">Overview</button>
+            <button type="button" class="tab-btn" data-tab="alerts">Alerts</button>
+            <button type="button" class="tab-btn" data-tab="logs">Logs</button>
+          </div>
+
+          <div class="tab-body">
+            <section class="tab-panel" id="tab-overview">
+              <div class="overview-grid">
+                <div class="overview-item">
+                  <span class="overview-label">Source</span>
+                  <span class="overview-value" id="overview-source">No active source</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Config</span>
+                  <span class="overview-value" id="overview-config">-</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Device</span>
+                  <span class="overview-value" id="overview-device">-</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Run Mode</span>
+                  <span class="overview-value" id="overview-run-mode">-</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Frame Size</span>
+                  <span class="overview-value" id="overview-resolution">-</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Preview Transport</span>
+                  <span class="overview-value" id="overview-preview-target">WebRTC / MediaMTX</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Frame Age</span>
+                  <span class="overview-value" id="overview-frame-age">-</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Preview URL</span>
+                  <span class="overview-value" id="overview-preview-url">-</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Alerts</span>
+                  <span class="overview-value" id="alerts-total">0 total</span>
+                </div>
+                <div class="overview-item">
+                  <span class="overview-label">Logs</span>
+                  <span class="overview-value" id="logs-total">0 lines</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="tab-panel hidden" id="tab-alerts">
+              <div class="scroll-list" id="alerts-list"></div>
+            </section>
+
+            <section class="tab-panel hidden" id="tab-logs">
+              <div class="scroll-list logs" id="logs-list"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="drawer-shell hidden" id="config-drawer-shell" aria-hidden="true">
+      <div class="drawer-backdrop" id="config-backdrop"></div>
+      <aside class="config-drawer" id="config-drawer">
+        <div class="drawer-head">
+          <div>
+            <p class="eyebrow">Advanced Config</p>
+            <h2>Runtime Settings</h2>
+            <p class="panel-copy">Open this panel only when you need to tune runtime behavior.</p>
+          </div>
+          <button type="button" class="ghost-btn" id="config-close-btn">Close</button>
+        </div>
+
+        <div class="drawer-body">
+          <section class="drawer-section">
+            <h3>Runtime</h3>
+            <div class="field">
+              <label for="config-select">Config file</label>
+              <select id="config-select"></select>
+            </div>
+            <div class="field two-col">
+              <div>
+                <label for="device">Device</label>
+                <select id="device"></select>
+              </div>
+              <div>
+                <label for="run-mode">Run mode</label>
+                <select id="run-mode"></select>
+              </div>
+            </div>
+            <div class="checks">
+              <label><input id="enable-telegram" type="checkbox" /> Enable Telegram</label>
+              <label><input id="save-video" type="checkbox" /> Save rendered video</label>
+            </div>
+          </section>
+
+          <details class="drawer-section tuning-section">
+            <summary>Optional tuning</summary>
+            <div class="drawer-detail-grid">
+              <div class="field two-col">
+                <div>
+                  <label for="mot-skip">MOT skip frame</label>
+                  <input id="mot-skip" type="number" min="0" max="16" placeholder="config default" />
+                </div>
+                <div>
+                  <label for="cls-skip">CLS skip frame</label>
+                  <input id="cls-skip" type="number" min="0" max="16" placeholder="config default" />
+                </div>
+              </div>
+              <div class="field two-col">
+                <div>
+                  <label for="mot-threshold">MOT threshold</label>
+                  <input id="mot-threshold" type="number" min="0" max="1" step="0.01" placeholder="config default" />
+                </div>
+                <div>
+                  <label for="cls-threshold">CLS threshold</label>
+                  <input id="cls-threshold" type="number" min="0" max="1" step="0.01" placeholder="config default" />
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+      </aside>
+    </div>
+
+    <script id="initial-options" type="application/json">{{ options | tojson }}</script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

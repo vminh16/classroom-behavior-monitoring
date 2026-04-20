@@ -124,6 +124,12 @@ Demo video mặc định:
 .\deploy_bundle\run_demo.ps1
 ```
 
+Launcher CMD thuần:
+
+```bat
+deploy_bundle\run_demo.cmd video
+```
+
 Webcam:
 
 ```powershell
@@ -209,6 +215,8 @@ Giá trị mặc định quan trọng:
 - `MOT.skip_frame_num = 2`
 - `ID_BASED_CLSACTION.skip_frame_num = 2`
 - `ID_BASED_CLSACTION.crop_mode = full`
+- `preview_local = auto`
+- `save_visual_output = auto`
 - `sleep_warn_seconds = 5.0`
 - `sleep_alert_seconds = 12.0`
 - `phone_warn_seconds = 6.0`

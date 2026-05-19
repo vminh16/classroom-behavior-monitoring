@@ -159,7 +159,7 @@ class MediaMTXManager:
             "webrtc": True,
             "webrtcAddress": "{}:{}".format(self._host, self._webrtc_port),
             "webrtcEncryption": False,
-            "webrtcAllowOrigins": ["*"],
+            "webrtcAllowOrigin": "*",
             "webrtcLocalUDPAddress": ":8189",
             "webrtcLocalTCPAddress": "",
             "webrtcIPsFromInterfaces": True,

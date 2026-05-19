@@ -1,6 +1,10 @@
 crop_thresh: 0.5
 visual: True
 visual_style: minimal
+preview_local: auto
+preview_max_fps: 12
+preview_max_width: 1280
+save_visual_output: auto
 warmup_frame: 10
 
 DET:
@@ -32,6 +36,12 @@ ID_BASED_CLSACTION:
   skip_frame_num: 2
   crop_mode: full
   upper_crop_ratio: 0.5
+  async_worker:
+    enable: True
+    queue_size: 1
+    frame_buffer_size: 32
+    worker_device: same
+    worker_run_mode: same
   state_machine:
     sleep_warn_seconds: 5.0
     sleep_alert_seconds: 12.0
@@ -45,9 +55,9 @@ ID_BASED_CLSACTION:
   enable: True
 
 TELEGRAM_ALERT:
-  enable: False
-  bot_token: ""
-  chat_id: ""
+  enable: True
+  bot_token: "8657581219:AAG9m3j--fujP0xcYlw3QTacAqfHGTUNiho"
+  chat_id: "-5183184480"
   send_rules:
     warn: ["enter"]
     alert: ["enter", "repeat"]
@@ -57,3 +67,7 @@ TELEGRAM_ALERT:
   send_retries: 3
   retry_delay_seconds: 1.0
   max_long_edge: 1280
+
+PUSH_STREAM:
+  queue_size: 1
+  muxdelay: 0.1

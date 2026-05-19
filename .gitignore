@@ -51,6 +51,9 @@ deploy_bundle/models/**
 !deploy_bundle/models/README.md
 models/**
 !models/README.md
+app/bin/mediamtx.exe
+app/bin/mediamtx/
+app/.runtime/
 
 # Logs
 *.log
